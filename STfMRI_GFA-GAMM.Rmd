@@ -1,0 +1,1529 @@
+---
+title: "ABCD_ScreenTime"
+output: html_document
+---
+```{r}
+var.exp <- function(res, elbow){
+  ps.mean.W <- apply(res$posterior$W, 2:3, mean)
+  ve <- colMeans(ps.mean.W^2)*100
+  tmp <- ve[order(-ve)]
+  cum.sum <- cumsum(tmp)
+  
+  print(paste0('All ',res$K, ' components explain ', round(sum(tmp),1),'% variance'))
+  
+  plot(1:length(tmp), tmp, 
+       xlab='Ordered component', ylab='% variance', type='b',
+       main='Components by Variance Explained')
+  abline(h=tmp[elbow], lty=2)
+  plot(1:length(tmp), cum.sum, type='b', xlab='Ordered component', 
+       ylab='Cumulative % variance explained', 
+       main=paste0('The ', elbow, ' components explain ', round(cum.sum[elbow],1), '% variance'))
+  abline(h=cum.sum[elbow], v=elbow, lty=2) 
+  plot(1:length(ve), ve, xlab='Component', ylab='% variance', type='b',
+       main='Components as extracted in GFA')
+  abline(h=tmp[elbow], lty=2)
+  # return(round(ve,1))
+  use <- order(-ve)[1:elbow]
+  use <- cbind(use,tmp[1:elbow])
+  return(use)
+}
+```
+
+```{r Common Code, echo=TRUE}
+
+# Common functions for analyses - taken from aulus et al., 2019 
+
+vis.W <- function(res,comp.use,block.names=NULL,pct.CI, GFAlabel) {
+  if (!is.na(pct.CI)){
+    lo = (1-pct.CI)/2
+    up = 1 - lo
+    cred.int <- apply(res$posterior$W[,,comp.use], 2:3, function(x) quantile(x, c(lo, up)))
+    x <- res$W[,comp.use] * (apply(cred.int, 2:3, prod)>0)*1
+  } else { 
+    x <- res$W[,comp.use] 
+  }
+  colnames(x) <- GFAlabel
+  D <- nrow(x); K <- ncol(x)
+  gr <- res$groups; M <- length(gr)
+  if (is.null(block.names)) { names(gr) <- paste("Source",1:M) }
+  else { names(gr) <- block.names }
+  gr1 <- c(0,cumsum(sapply(gr,length))); names(gr1) <- c(names(gr),"NA")
+  
+  mar <- c(6,4,4,6)
+  par(mar=mar)
+  cols <- colorRampPalette(c("orange","red","white","blue","cyan"))(19)
+  if(any(is.na(x))) cols <- colorRampPalette(c("orange","red","#DDDDDD","blue","cyan"))(19)
+  M <- max(abs(x),na.rm=T)
+  breaks <- seq(-M,M,length=20)
+  
+  title <- c("GFA Matrix","Components","Features")
+  if (length(comp.use)==res$K){
+    title[1] <- paste0(title[1], ' (all components & ', sum(x), ' loadings)')
+  }
+  if (!is.na(pct.CI)){
+    title[1] <- paste0(title[1], ' (', sum(x!=0),' loadings: ',pct.CI*100,'% Credible Interval)')
+  }
+  image(1:D,1:K,x[,K:1],col=cols,breaks=breaks,axes=F,main=title[1],
+        xlab="",ylab="")
+  title(xlab=title[3],line=mar[1]-1)
+  title(ylab=title[2],line=mar[2]-1)
+  box()
+  par(las=2)
+  axis(1, 1:D, rownames(x), cex.axis=D^(-1/5))
+  axis(2, K:1, colnames(x), cex.axis=K^(-1/5))
+  
+  #Grouping
+  par(xpd=T)
+  mu <- gr1[-1]/2+gr1[-length(gr1)]/2
+  N <- K
+  for(i in 1:length(mu)) {
+    if(i!=length(mu)) lines(rep(gr1[i+1]+1/2,2), c(.5, N*1.03+.5), lwd=2)
+    text(mu[i],N*1.03+.5,names(gr1)[i])
+  }
+  #Colorbar
+  n <- length(cols)
+  cba <- D + 1/2 + D/60; cbw <- D/40
+  for(i in 1:n){
+    polygon(c(0,cbw,cbw,0)+cba, c(0,0,N/n,N/n)+N*(i-1)/n+1/2,
+            col=cols[i], border=NA)
+  }
+  #Colorbar: axis
+  lines(rep(cba+cbw,2),c(0,N)+1/2)
+  m <- 10^floor(log10(M)); m <- floor(M/m)*m
+  for(l in c(-m,0,m)) {
+    ly <- N*(l/M/2+.5)+1/2
+    lines(cba+cbw-c(cbw,-cbw)/5, rep(ly,2))
+    text(cba+cbw*2.5,ly,l)
+  }
+  par(xpd=F)
+}
+
+## @knitr repRow
+
+# Need this function
+rep.row<-function(x,n){
+  matrix(rep(x,each=n),nrow=n)
+}
+
+## @knitr myGamm
+myGAMM4 <- function(dv,iv,cv,nv,dat)
+{
+  
+  indv <- paste(iv, collapse=" + ")
+  cova <- paste(cv, collapse=" + ")
+  nstv <- paste("~","(","1","|",nv[1],"/",nv[2],")",sep="")
+  
+  datnames <- names(dat)
+  
+  if(iv %in% datnames) {
+    form1 <- paste(dv," ~ ",indv," + ",cova,sep="")
+  } else { form1 <- paste(dv," ~ ",cova,sep="")}
+  
+  print(form1)
+  print(nstv)
+  
+  mygam <- gamm4(as.formula(form1), random = as.formula(nstv), data = dat)
+  
+  return(mygam)
+}
+
+Gamm4.vis <- function(allgfagam2,data,xvari,yvar,idv,covs,xlabel,ylabel){
+  
+  xvar <- which(colnames(data)==xvari)
+  
+  # setting up the data frame    
+  plot.df <- data.frame(GFA = rep(seq(min(data[,xvar]), max(data[,xvar]), length.out=200),2), female=rep(levels(as.factor(data$female)) , each=200) )
+  colnames(plot.df)[1] <- names(data[xvar])
+  
+  # setting up the covariates
+  cvar <- idv[!(colnames(data[c(idv)]) %in% xvari)]
+  avdata <- data.frame(rep.row(colMeans(data[,cvar]),400))
+  colnames(avdata)<- names(data[,cvar])
+  
+  
+  # Factor Variables:
+  fvar <- covs[!(colnames(data[c(covs)]) %in% "age")]
+  # populate the factors:
+  initdata <- facdata <- data[5,fvar]
+  for(i in 1:199){
+    facdata <- rbind(facdata,initdata)
+  }
+  
+  plot.df <- cbind(plot.df,avdata,row.names = NULL)
+  plot.df <- cbind(plot.df,facdata,row.names = NULL)
+  
+  plot.df = cbind(plot.df, as.data.frame(predict( allgfagam2$gam, plot.df, se.fit = T)))
+  pre.gamm.plot = plot.df
+  pre.gamm.plot$se = pre.gamm.plot$se.fit
+  print(names(pre.gamm.plot))
+  pre.gamm.plot <- pre.gamm.plot[, !duplicated(colnames(pre.gamm.plot))]
+  myplot <- ggplot(data=pre.gamm.plot, aes(x=pre.gamm.plot[,1],y=fit)) + geom_line(aes(y=fit,col=factor(female)), size=1) + geom_line(aes(y=fit+2*se,col=factor(female)), linetype="dashed") + xlab(xlabel) + ylab(ylabel)  + geom_line(aes(y=fit-2*se,col=factor(sex)), linetype="dashed") + scale_colour_discrete(labels =c("Male", "Female")) + ylim(-1, 1) + guides(color=guide_legend("Sex"))
+  
+  return(myplot)
+  
+}
+```
+
+
+```{r}
+# Circular Plot of the GFA Data
+Circbar <- function(mydata, ebar,graphtitle){
+  
+  data <- mydata  
+  # Assign min and max
+  
+  mymin <- ifelse(-1.5 + min(mydata$CI025) < -2.5,-1.5 + min(mydata$CI025),-2.5)
+  mymax <- 1+ max(mydata$CI975)
+  
+  # Set a number of 'empty bar' to add at the end of each group
+  empty_bar <- ebar
+  
+  to_add = data.frame( matrix(NA, empty_bar*nlevels(data$GFAgroups), ncol(data)) )
+  colnames(to_add) = colnames(data)
+  to_add$GFAgroups=rep(levels(data$GFAgroups), each=empty_bar)
+  data=rbind(data, to_add)
+  data=data %>% arrange(GFAgroups)
+  data$id=seq(1, nrow(data))
+  
+  # Get the name and the y position of each label
+  label_data=data
+  number_of_bar=nrow(label_data)
+  angle= 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+  label_data$hjust<-ifelse( angle < -90, 1, 0)
+  label_data$angle<-ifelse(angle < -90, angle+180, angle)
+  
+  # prepare a data frame for base lines
+  base_data=data %>%
+    group_by(GFAgroups) %>%
+    summarise(start=min(id), end=max(id) - empty_bar) %>%
+    rowwise() %>%
+    mutate(Title=mean(c(start, end)))
+  
+  # prepare a data frame for grid (scales)
+  grid_data = base_data
+  grid_data$end = grid_data$end[ c( nrow(grid_data), 1:nrow(grid_data)-1)] + 1
+  grid_data$start = grid_data$start - 1
+  #grid_data=grid_data[-1,]
+  
+  # Make the plot
+  p = ggplot(data, aes(x=as.factor(id), y=Median, fill=GFAgroups)) +       
+    # Note that id is a factor. If x is numeric, there is some space between the first bar
+    
+    geom_bar(aes(x=as.factor(id), y=Median, fill=GFAgroups), stat="identity", alpha=0.5)  +
+    geom_errorbar(aes(x=as.factor(id),ymin=CI025,ymax=CI975,color="Gray")) +
+    
+    # Add a level lines.
+    geom_segment(data=grid_data, aes(x = end, y = min(mydata$CI025), xend = start, yend = min(mydata$CI025)), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+    geom_segment(data=grid_data, aes(x = end, y = max(mydata$CI975), xend = start, yend = max(mydata$CI975)), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+    
+    # Add text showing the value of each level lines
+    annotate("text", x = rep(max(data$id),3), y = c(min(mydata$CI025),0, max(mydata$CI975)), label = format(c(min(mydata$CI025),0, max(mydata$CI975)),digits=2) , color="black", size=3 , angle=0, fontface="bold", hjust=1) +
+    
+    ylim(mymin,mymax) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      plot.margin = unit(rep(-1,4), "cm")
+    ) +
+    coord_polar() +
+    geom_text(data=label_data, aes(x=id, y=mymax-.9, label=GFAvarlabs, hjust=hjust), color="black", fontface="bold",alpha=0.6, size=2.5, angle= label_data$angle, inherit.aes = FALSE )  +
+    
+    # Add base line information
+    geom_segment(data=base_data, aes(x = start, y = -1.1 , xend = end, yend = -1.1, colour=GFAgroups), alpha=0.8, size=1 , inherit.aes = FALSE )  +
+    
+    geom_segment(data=base_data, aes(x = start, y = 0 , xend = end, yend = 0), colour = "Gray", alpha=0.8, size=0.6 , inherit.aes = FALSE )  +
+    
+    geom_text(data=grid_data, aes(x = Title, y = -1.4, label=GFAgroups),color="black", fontface="bold") +
+    
+    annotate("text", x = 0, y = -2.1, label = c(graphtitle) , color="red", size=6 , fontface="bold")
+  
+  return(p)
+  
+}
+
+
+
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c("knitr","data.table","tidyverse", "dplyr",
+              "ggplot2","RColorBrewer","corrplot","gridExtra",
+              "GFA","gamm4","psych", "glmnet", "tableone", "Hmisc")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+lapply(packages, library, character.only = TRUE)
+
+theme_kate <- function () { 
+  theme_bw() +
+  theme_minimal(base_size = 16, base_family = "Avenir") +
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        axis.text = element_text(size=14),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+        #legend.position="none")
+}
+
+# Color palette
+colST <- colorRampPalette(c("#fee391", "#fe9929", "#253494"))
+```
+
+Load the Data
+```{r}
+
+basedir = '/Users/jackmiller/STfMRI/Package_1188522/' 
+outputdir = '/Users/jackmiller/STfMRI/Figures/'
+# Load resting state functional connectivity data
+gordon<-read.delim(paste0(basedir,"abcd_betnet02.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+# Load brain imaging quality control data
+restingstateQC<-read.delim(paste0(basedir,"mriqcrp102.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+# Load anatomical brain scan quality control data
+freesurferQC<-read.delim(paste0(basedir,"freesqc01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+# Load screen time data
+screentimechild<-read.delim(paste0(basedir,"abcd_stq01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+# Load mental health data
+CBCL<-read.delim(paste0(basedir,"abcd_cbcls01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+# Load cognitive variable data
+nihtoolbox<-read.delim(paste0(basedir,"abcd_tbss01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+nihpearsonscores<-read.delim(paste0(basedir,"abcd_ps01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+# Load demographic characteristics
+parentdem<-read.delim(paste0(basedir,"pdem02.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+#recode the household income variable
+parentdem <- parentdem %>% mutate(familyincome = ifelse(as.integer(as.character(demo_comb_income_v2)) <=4, "<$25k", ifelse(as.integer(as.character(demo_comb_income_v2)) >4 & as.integer(as.character(demo_comb_income_v2)) <=6, "$25k-50k", ifelse(as.integer(as.character(demo_comb_income_v2))>6 & as.integer(as.character(demo_comb_income_v2))<9, "$50k-100k", ifelse(as.integer(as.character(demo_comb_income_v2))>=9 & as.integer(as.character(demo_comb_income_v2))< 777, "100k", "Other")))))
+
+#give 1s to married parents, 0 to nonmarried 
+parentdem <- parentdem %>% mutate(married = ifelse(as.integer(as.character(demo_prnt_marital_v2)) <2, 1, 0))
+
+parentdem$RaceWhite <- parentdem$demo_race_a_p___10
+parentdem$RaceBlack <- parentdem$demo_race_a_p___11
+parentdem <- parentdem %>% mutate(RaceLatinx = ifelse(as.integer(as.character(demo_ethn_v2)) ==1,1, 0))
+
+parentdem <-parentdem %>% mutate(RaceAsian = ifelse(as.integer(as.character(demo_race_a_p___18)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___19)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___20)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___21)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___22)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___23)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___24)) == 1, 1, 0))))))))
+
+#Load height/weight data:
+physicaldem<-read.delim(paste0(basedir,"abcd_ant01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+#calculate BMI:
+physicaldem$bmi <- (as.numeric(physicaldem$anthroweight1lb)/(as.numeric(physicaldem$anthro_1_height_in) * as.numeric(physicaldem$anthro_1_height_in))) *703
+
+#remove outliers in the BMI data - some heights and weights are coded incorrectly in the data
+physicaldem2 <- filter(physicaldem, bmi<40)
+physicaldem2 <- filter(physicaldem2, bmi>8)
+
+
+
+```
+
+Apply inclusion criteria
+```{r}
+# Second release (1.1) QC list of good scans 
+
+# Extract list of participants who passed freesurfer QC (1=pass)
+freesurferpass<-freesurferQC %>%
+  filter(fsqc_qc==1) %>%
+  dplyr::select(subjectkey)
+
+# Extract list of participants who passed resting state QC for gordon 
+# rsfmri_c_ngd_ntpoints = Number of frames after excluding outlier frames (based on standard deviation across ROIs)
+gordonpass<-gordon%>%
+  filter(as.numeric(as.character(rsfmri_c_ngd_ntpoints))>375) %>%
+  dplyr::select(subjectkey)
+
+# Extract list of participants who passed resting state QC
+# iqc_rsfmri_ok_ser = rsfMRI: Number of series that are complete and passed QC (ignoring PC)
+# iqc_t1_ok_ser = T1: Number of series that are complete and passed QC (ignoring PC)
+# iqc_rsfmri_ok_sub_02_filt_nody = rsfMRI: Total number of seconds of framewise displacement below 0.2mm using the filtering technique and without y-displacement for all OK scans
+rs_good<-restingstateQC %>%
+   filter(as.numeric(as.character(iqc_rsfmri_ok_ser))>2) %>%
+   filter(as.numeric(as.character(iqc_t1_ok_ser))>0) %>%
+  filter(as.numeric(as.character(iqc_rsfmri_ok_sub_02_filt_nody))>600) %>%
+  dplyr::select(subjectkey)
+
+allgood<-inner_join(gordonpass,freesurferpass)
+allgood<-inner_join(allgood,rs_good)
+
+```
+
+Correlate screen time activities and plot
+```{r}
+# Convert screen time factors to numeric data
+forcednumericsST<-screentimechild%>%
+               dplyr::select(screen1_wkdy_y,screen2_wkdy_y,
+                      screen3_wkdy_y,screen4_wkdy_y,
+                      screen5_wkdy_y,screen_wkdy_y,
+                      screen7_wknd_y,screen8_wknd_y,
+                      screen9_wknd_y,screen10_wknd_y,
+                      screen11_wknd_y,screen12_wknd_y) %>%
+                mutate(TVMovies_wkdy=as.numeric(as.character(na.omit(screen1_wkdy_y))),
+                       Videos_wkdy=as.numeric(as.character(na.omit(screen2_wkdy_y))),
+                       Videogames_wkdy=as.numeric(as.character(na.omit(screen3_wkdy_y))),
+                       Text_wkdy=as.numeric(as.character(na.omit(screen4_wkdy_y))),
+                       SocMedia_wkdy=as.numeric(as.character(na.omit(screen5_wkdy_y))),
+                       VideoChat_wkdy=as.numeric(as.character(na.omit(screen_wkdy_y))),
+                       TVMovies_wknd=as.numeric(as.character(na.omit(screen7_wknd_y))),
+                       Videos_wknd=as.numeric(as.character(na.omit(screen8_wknd_y))),
+                       Videogames_wknd=as.numeric(as.character(na.omit(screen9_wknd_y))),
+                       Text_wknd=as.numeric(as.character(na.omit(screen10_wknd_y))),
+                       SocMedia_wknd=as.numeric(as.character(na.omit(screen11_wknd_y))),
+                       VideoChat_wknd=as.numeric(as.character(na.omit(screen12_wknd_y)))) %>%
+  dplyr::select(13:24)
+
+# Correlation matrix for child report screen time
+corr_st<-cor(forcednumericsST,
+             method="kendall",
+             use = "pairwise.complete.obs")
+
+# Correlation plot for child report screen time across activities
+png(filename=paste0(outputdir,"child_st_corrplot.png"),
+    width=7,height=5,units="in",res=300,bg="transparent")
+corrplot::corrplot.mixed(corr_st,
+                         lower = "number",
+                         lower.col = "black",
+                         upper = "ellipse",
+                         order="hclust",
+                         cl.lim = 0:1,
+                         tl.pos = "lt",
+                         tl.cex = .5,
+                         tl.col = "black",
+                         number.cex = .5,
+                         mar=c(0,0,1,0))
+dev.off()
+```
+
+Filter, extract and combine relevant variables
+```{R}
+# Only examine participants who passed inclusion/exclusion criteria:
+
+# Filter resting state correlation data:
+filteredRS<-gordon %>% filter(subjectkey %in% allgood$subjectkey)
+
+# Filter CBCL and select outcomes of interest
+filteredCBCL<-CBCL %>% filter(subjectkey %in% allgood$subjectkey) %>%
+  dplyr::select(subjectkey,cbcl_scr_syn_internal_t,cbcl_scr_syn_external_t)
+
+# Filter cognitive variables and select outcomes of interest
+filteredcognition<-full_join((nihtoolbox %>% filter(subjectkey %in% allgood$subjectkey) %>%
+  dplyr::select(subjectkey,
+                nihtbx_picvocab_agecorrected,
+                nihtbx_flanker_agecorrected,
+                nihtbx_list_agecorrected,
+                nihtbx_cardsort_agecorrected,
+                nihtbx_pattern_agecorrected,
+                nihtbx_picture_agecorrected,
+                nihtbx_reading_agecorrected)),
+  (nihpearsonscores %>% filter(subjectkey %in% allgood$subjectkey) %>%
+  dplyr::select(subjectkey,
+                pea_wiscv_tss)))
+  
+# Combine resting state data with screen time data
+restscreentime<-left_join(filteredRS,screentimechild,by=c("subjectkey", "src_subject_id", "sex")) %>%
+                mutate(TVMovies_wkdy=as.numeric(as.character(screen1_wkdy_y)),
+                       Videos_wkdy=as.numeric(as.character(screen2_wkdy_y)),
+                       Videogames_wkdy=as.numeric(as.character(screen3_wkdy_y)),
+                       Text_wkdy=as.numeric(as.character(screen4_wkdy_y)),
+                       SocMedia_wkdy=as.numeric(as.character(screen5_wkdy_y)),
+                       VideoChat_wkdy=as.numeric(as.character(screen_wkdy_y)),
+                       TVMovies_wknd=as.numeric(as.character(screen7_wknd_y)),
+                       Videos_wknd=as.numeric(as.character(screen8_wknd_y)),
+                       Videogames_wknd=as.numeric(as.character(screen9_wknd_y)),
+                       Text_wknd=as.numeric(as.character(screen10_wknd_y)),
+                       SocMedia_wknd=as.numeric(as.character(screen11_wknd_y)),
+                       VideoChat_wknd=as.numeric(as.character(screen12_wknd_y)))  %>%
+  mutate(total_child_weekday=rowSums(cbind(TVMovies_wkdy,Videos_wkdy,Videogames_wkdy,
+                                     Text_wkdy,SocMedia_wkdy,VideoChat_wkdy),na.rm = TRUE),
+         total_child_weekend=rowSums(cbind(TVMovies_wknd,Videos_wknd,
+                      Videogames_wknd,Text_wknd,
+                      SocMedia_wknd,VideoChat_wknd),na.rm = TRUE)) %>%
+  mutate(total_child_week=((5*total_child_weekday)+(2*total_child_weekend)))
+
+restscreentime[23:191] <- lapply(restscreentime[23:191], function(x) as.numeric(as.character(x)))
+
+# Calculate quartiles for total screen time use and assign to participants for demographics table
+restscreentime <- within(restscreentime, quartile <- as.integer(cut(total_child_week, quantile(total_child_week, probs=0:4/4), include.lowest=TRUE)))
+
+
+# Combine resting state and screen time data with mental health outcomes
+restscreentime<-left_join(restscreentime,filteredCBCL) %>%
+  mutate(internalizing=as.numeric(as.character(cbcl_scr_syn_internal_t)),
+         externalizing=as.numeric(as.character(cbcl_scr_syn_external_t)))
+
+# Add the cognitive outcomes
+restscreentime<-left_join(restscreentime,filteredcognition) %>%
+  mutate(matrix_reasoning=as.numeric(as.character(pea_wiscv_tss)),
+         picvocab=as.numeric(as.character(nihtbx_picvocab_agecorrected)),
+         flanker=as.numeric(as.character(nihtbx_flanker_agecorrected)),
+         listsort=as.numeric(as.character(nihtbx_list_agecorrected)),
+         cardsort=as.numeric(as.character(nihtbx_cardsort_agecorrected)),
+         pattern=as.numeric(as.character(nihtbx_pattern_agecorrected)),
+         picture=as.numeric(as.character(nihtbx_picture_agecorrected)),
+         reading=as.numeric(as.character(nihtbx_reading_agecorrected)))
+
+# Network correlations of interest
+cois<-restscreentime %>%
+  dplyr::select(rsfmri_c_ngd_ad_ngd_ad,
+                rsfmri_c_ngd_ad_ngd_cgc,
+                rsfmri_c_ngd_ad_ngd_ca,
+                rsfmri_c_ngd_ad_ngd_dt,
+                rsfmri_c_ngd_ad_ngd_dla,
+                rsfmri_c_ngd_ad_ngd_fo,
+                rsfmri_c_ngd_ad_ngd_rspltp,
+                rsfmri_c_ngd_ad_ngd_smh,
+                rsfmri_c_ngd_ad_ngd_smm,
+                rsfmri_c_ngd_ad_ngd_sa,
+                rsfmri_c_ngd_ad_ngd_vta,
+                rsfmri_c_ngd_ad_ngd_vs,
+                rsfmri_c_ngd_cgc_ngd_cgc,
+                rsfmri_c_ngd_cgc_ngd_ca,
+                rsfmri_c_ngd_cgc_ngd_dt,
+                rsfmri_c_ngd_cgc_ngd_dla,
+                rsfmri_c_ngd_cgc_ngd_fo,
+                rsfmri_c_ngd_cgc_ngd_rspltp,
+                rsfmri_c_ngd_cgc_ngd_smh,
+                rsfmri_c_ngd_cgc_ngd_smm,
+                rsfmri_c_ngd_cgc_ngd_sa,
+                rsfmri_c_ngd_cgc_ngd_vta,
+                rsfmri_c_ngd_cgc_ngd_vs,
+                rsfmri_c_ngd_ca_ngd_ca,
+                rsfmri_c_ngd_ca_ngd_dt,
+                rsfmri_c_ngd_ca_ngd_dla,
+                rsfmri_c_ngd_ca_ngd_fo,
+                rsfmri_c_ngd_ca_ngd_rspltp,
+                rsfmri_c_ngd_ca_ngd_smh,
+                rsfmri_c_ngd_ca_ngd_smm,
+                rsfmri_c_ngd_ca_ngd_sa,
+                rsfmri_c_ngd_ca_ngd_vta,
+                rsfmri_c_ngd_ca_ngd_vs,
+                rsfmri_c_ngd_dt_ngd_dt,
+                rsfmri_c_ngd_dt_ngd_dla,
+                rsfmri_c_ngd_dt_ngd_fo,
+                rsfmri_c_ngd_dt_ngd_rspltp,
+                rsfmri_c_ngd_dt_ngd_smh,
+                rsfmri_c_ngd_dt_ngd_smm,
+                rsfmri_c_ngd_dt_ngd_sa,
+                rsfmri_c_ngd_dt_ngd_vta,
+                rsfmri_c_ngd_dt_ngd_vs,
+                rsfmri_c_ngd_dla_ngd_dla,
+                rsfmri_c_ngd_dla_ngd_fo,
+                rsfmri_c_ngd_dla_ngd_rspltp,
+                rsfmri_c_ngd_dla_ngd_smh,
+                rsfmri_c_ngd_dla_ngd_smm,
+                rsfmri_c_ngd_dla_ngd_sa,
+                rsfmri_c_ngd_dla_ngd_vta,
+                rsfmri_c_ngd_dla_ngd_vs,
+                rsfmri_c_ngd_fo_ngd_fo,
+                rsfmri_c_ngd_fo_ngd_rspltp,
+                rsfmri_c_ngd_fo_ngd_smh,
+                rsfmri_c_ngd_fo_ngd_smm,
+                rsfmri_c_ngd_fo_ngd_sa,
+                rsfmri_c_ngd_fo_ngd_vta,
+                rsfmri_c_ngd_fo_ngd_vs,
+                rsfmri_c_ngd_rspltp_ngd_rspltp,
+                rsfmri_c_ngd_rspltp_ngd_smh,
+                rsfmri_c_ngd_rspltp_ngd_smm,
+                rsfmri_c_ngd_rspltp_ngd_sa,
+                rsfmri_c_ngd_rspltp_ngd_vta,
+                rsfmri_c_ngd_rspltp_ngd_vs,
+                rsfmri_c_ngd_smh_ngd_smh,
+                rsfmri_c_ngd_smh_ngd_smm,
+                rsfmri_c_ngd_smh_ngd_sa,
+                rsfmri_c_ngd_smh_ngd_vta,
+                rsfmri_c_ngd_smh_ngd_vs,
+                rsfmri_c_ngd_smm_ngd_smm,
+                rsfmri_c_ngd_smm_ngd_sa,
+                rsfmri_c_ngd_smm_ngd_vta,
+                rsfmri_c_ngd_smm_ngd_vs,
+                rsfmri_c_ngd_sa_ngd_sa,
+                rsfmri_c_ngd_sa_ngd_vta,
+                rsfmri_c_ngd_sa_ngd_vs,
+                rsfmri_c_ngd_vta_ngd_vta,
+                rsfmri_c_ngd_vta_ngd_vs,
+                rsfmri_c_ngd_vs_ngd_vs)
+
+```
+
+Create demographics table
+```{R}
+demo.df<-left_join(restscreentime,parentdem,by = c("subjectkey", "src_subject_id", "sex"))
+demo.df <-left_join(demo.df,physicaldem2[ , c("subjectkey", "bmi")],by = "subjectkey")
+
+demo.df<-left_join(demo.df,(restingstateQC %>% select(subjectkey,iqc_rsfmri_ok_sub_02_filt_nody)))                   %>%
+                     mutate(interview_age=as.integer(as.character(interview_age)),
+                            iqc_rsfmri_ok_sub_02_filt_nody=as.numeric(as.character(iqc_rsfmri_ok_sub_02_filt_nody)))
+
+demo.df<-demo.df %>%
+  mutate(demo_prnt_ed_v2_strat=ifelse(as.integer(as.character(demo_prnt_ed_v2))<=12,"no_hs_grad",
+                                      ifelse(as.integer(as.character(demo_prnt_ed_v2))>12 & as.integer(as.character(demo_prnt_ed_v2))<15,"hs_grad",
+                                             ifelse(as.integer(as.character(demo_prnt_ed_v2))>17 && as.integer(as.character(demo_prnt_ed_v2))<22,"ba_or_higher"))))
+demo.df$interview_age = as.numeric(demo.df$interview_age)
+demo.df$RaceLatinx = as.character(demo.df$RaceLatinx)
+demo.df$RaceAsian = as.character(demo.df$RaceAsian)
+
+## Create a TableOne object
+table1 <- CreateTableOne(vars = c("interview_age", "total_child_week","iqc_rsfmri_ok_sub_02_filt_nody",
+                                  "sex","RaceWhite", "RaceLatinx","RaceBlack", "RaceAsian", "demo_prnt_ed_v2_strat", "bmi", "married", "familyincome"),
+                       strata = "quartile",
+                       data = demo.df,
+                       factorVars = c("sex","demo_ethn_v2","demo_prnt_ed_v2_strat"))
+
+tablematrix <- print(table1, printToggle = FALSE, noSpaces = TRUE, minMax = TRUE)
+kable(tablematrix,"html") 
+write.csv(tablematrix, file = "demographstquart.csv")
+
+```
+
+Resting state descriptive graphs
+```{r}
+# Seconds of RS data for participants in present analysis
+RSquality<-ggplot(left_join(restscreentime,(restingstateQC %>% filter(subjectkey %in% allgood$subjectkey))), aes(x=as.numeric(as.character(iqc_rsfmri_ok_sub_02_filt_nody)), fill=as.factor(quartile))) +
+  geom_density(alpha=.3)+
+  theme_kate()
+RSquality
+
+# Example 
+FP_DMN_dist<-ggplot(restscreentime,
+                    aes(x=rsfmri_c_ngd_fo_ngd_dt,
+                        fill=as.factor(quartile))) +
+  geom_density(alpha=.3) +
+  theme_kate()
+FP_DMN_dist
+
+# Make resting state network correlaion names meaningful
+restscreentime<-restscreentime %>%
+  mutate(audi_audi=rsfmri_c_ngd_ad_ngd_ad,
+         audi_cingoper=rsfmri_c_ngd_ad_ngd_cgc,
+         audi_cingpari=rsfmri_c_ngd_ad_ngd_ca,
+         audi_default=rsfmri_c_ngd_ad_ngd_dt,
+         audi_dorsalattention=rsfmri_c_ngd_ad_ngd_dla,
+         audi_frontoparietal=rsfmri_c_ngd_ad_ngd_fo,
+         audi_retrosplenial=rsfmri_c_ngd_ad_ngd_rspltp,
+         audi_hand=rsfmri_c_ngd_ad_ngd_smh,
+         audi_mouth=rsfmri_c_ngd_ad_ngd_smm,
+         audi_salience=rsfmri_c_ngd_ad_ngd_sa,
+         audi_ventralattention=rsfmri_c_ngd_ad_ngd_vta,
+         audi_visual=rsfmri_c_ngd_ad_ngd_vs,
+         cingoper_cingoper=rsfmri_c_ngd_cgc_ngd_cgc,
+         cingoper_cingpari=rsfmri_c_ngd_cgc_ngd_ca,
+         cingoper_default=rsfmri_c_ngd_cgc_ngd_dt,
+         cingoper_dorsalattention=rsfmri_c_ngd_cgc_ngd_dla,
+         cingoper_frontoparietal=rsfmri_c_ngd_cgc_ngd_fo,
+         cingoper_retrosplenial=rsfmri_c_ngd_cgc_ngd_rspltp,
+         cingoper_hand=rsfmri_c_ngd_cgc_ngd_smh,
+         cingoper_mouth=rsfmri_c_ngd_cgc_ngd_smm,
+         cingoper_salience=rsfmri_c_ngd_cgc_ngd_sa,
+         cingoper_ventralattention=rsfmri_c_ngd_cgc_ngd_vta,
+         cingoper_visual=rsfmri_c_ngd_cgc_ngd_vs,
+         cingpari_cingpari=rsfmri_c_ngd_ca_ngd_ca,
+         cingpari_default=rsfmri_c_ngd_ca_ngd_dt,
+         cingpari_dorsalattention=rsfmri_c_ngd_ca_ngd_dla,
+         cingpari_frontoparietal=rsfmri_c_ngd_ca_ngd_fo,
+         cingpari_retrosplenial=rsfmri_c_ngd_ca_ngd_rspltp,
+         cingpari_hand=rsfmri_c_ngd_ca_ngd_smh,
+         cingpari_mouth=rsfmri_c_ngd_ca_ngd_smm,
+         cingpari_salience=rsfmri_c_ngd_ca_ngd_sa,
+         cingpari_ventralattention=rsfmri_c_ngd_ca_ngd_vta,
+         cingpari_visual=rsfmri_c_ngd_ca_ngd_vs,
+         default_default=rsfmri_c_ngd_dt_ngd_dt,
+         default_dorsalattention=rsfmri_c_ngd_dt_ngd_dla,
+         default_frontoparietal=rsfmri_c_ngd_dt_ngd_fo,
+         default_retrosplenial=rsfmri_c_ngd_dt_ngd_rspltp,
+         default_hand=rsfmri_c_ngd_dt_ngd_smh,
+         default_mouth=rsfmri_c_ngd_dt_ngd_smm,
+         default_salience=rsfmri_c_ngd_dt_ngd_sa,
+         default_ventralattention=rsfmri_c_ngd_dt_ngd_vta,
+         default_visual=rsfmri_c_ngd_dt_ngd_vs,
+         dorsalattention_dorsalattention=rsfmri_c_ngd_dla_ngd_dla,
+         dorsalattention_frontoparietal=rsfmri_c_ngd_dla_ngd_fo,
+         dorsalattention_retrosplenial=rsfmri_c_ngd_dla_ngd_rspltp,
+         dorsalattention_hand=rsfmri_c_ngd_dla_ngd_smh,
+         dorsalattention_mouth=rsfmri_c_ngd_dla_ngd_smm,
+         dorsalattention_salience=rsfmri_c_ngd_dla_ngd_sa,
+         dorsalattention_ventralattention=rsfmri_c_ngd_dla_ngd_vta,
+         dorsalattention_visual=rsfmri_c_ngd_dla_ngd_vs,
+         frontoparietal_frontoparietal=rsfmri_c_ngd_fo_ngd_fo,
+         frontoparietal_retrosplenial=rsfmri_c_ngd_fo_ngd_rspltp,
+         frontoparietal_hand=rsfmri_c_ngd_fo_ngd_smh,
+         frontoparietal_mouth=rsfmri_c_ngd_fo_ngd_smm,
+         frontoparietal_salience=rsfmri_c_ngd_fo_ngd_sa,
+         frontoparietal_ventralattention=rsfmri_c_ngd_fo_ngd_vta,
+         frontoparietal_visual=rsfmri_c_ngd_fo_ngd_vs,
+         retrosplenial_retrosplenial=rsfmri_c_ngd_rspltp_ngd_rspltp,
+         retrosplenial_hand=rsfmri_c_ngd_rspltp_ngd_smh,
+         retrosplenial_mouth=rsfmri_c_ngd_rspltp_ngd_smm,
+         retrosplenial_salience=rsfmri_c_ngd_rspltp_ngd_sa,
+         retrosplenial_ventralattention=rsfmri_c_ngd_rspltp_ngd_vta,
+         retrosplenial_visual=rsfmri_c_ngd_rspltp_ngd_vs,
+         hand_hand=rsfmri_c_ngd_smh_ngd_smh,
+         hand_mouth=rsfmri_c_ngd_smh_ngd_smm,
+         hand_salience=rsfmri_c_ngd_smh_ngd_sa,
+         hand_ventralattention=rsfmri_c_ngd_smh_ngd_vta,
+         hand_visual=rsfmri_c_ngd_smh_ngd_vs,
+         mouth_mouth=rsfmri_c_ngd_smm_ngd_smm,
+         mouth_salience=rsfmri_c_ngd_smm_ngd_sa,
+         mouth_ventralattention=rsfmri_c_ngd_smm_ngd_vta,
+         mouth_visual=rsfmri_c_ngd_smm_ngd_vs,
+         salience_visual=rsfmri_c_ngd_sa_ngd_sa,
+         salience_ventralattention=rsfmri_c_ngd_sa_ngd_vta,
+         salience_salience=rsfmri_c_ngd_sa_ngd_vs,
+         ventralattention_ventralattention=rsfmri_c_ngd_vta_ngd_vta,
+         ventralattention_visual=rsfmri_c_ngd_vta_ngd_vs,
+         visual_visual=rsfmri_c_ngd_vs_ngd_vs)
+
+# Correlation plot for network correlations and screen media use 
+corr_STRS<-cor(restscreentime %>%
+                 dplyr::select(audi_audi,
+                               audi_cingoper,
+                               audi_cingpari,
+                               audi_default,
+                               audi_dorsalattention,
+                               audi_frontoparietal,
+                               audi_retrosplenial,
+                               audi_hand,
+                               audi_mouth,
+                               audi_salience,
+                               audi_ventralattention,
+                               audi_visual,
+                               cingoper_cingoper,
+                               cingoper_cingpari,
+                               cingoper_default,
+                               cingoper_dorsalattention,
+                               cingoper_frontoparietal,
+                               cingoper_retrosplenial,
+                               cingoper_hand,
+                               cingoper_mouth,
+                               cingoper_salience,
+                               cingoper_ventralattention,
+                               cingoper_visual,
+                               cingpari_cingpari,
+                               cingpari_default,
+                               cingpari_dorsalattention,
+                               cingpari_frontoparietal,
+                               cingpari_retrosplenial,
+                               cingpari_hand,
+                               cingpari_mouth,
+                               cingpari_salience,
+                               cingpari_ventralattention,
+                               cingpari_visual,
+                               default_default,
+                               default_dorsalattention,
+                               default_frontoparietal,
+                               default_retrosplenial,
+                               default_hand,
+                               default_mouth,
+                               default_salience,
+                               default_ventralattention,
+                               default_visual,
+                               dorsalattention_dorsalattention,
+                               dorsalattention_frontoparietal,
+                               dorsalattention_retrosplenial,
+                               dorsalattention_hand,
+                               dorsalattention_mouth,
+                               dorsalattention_salience,
+                               dorsalattention_ventralattention,
+                               dorsalattention_visual,
+                               frontoparietal_frontoparietal,
+                               frontoparietal_retrosplenial,
+                               frontoparietal_hand,
+                               frontoparietal_mouth,
+                               frontoparietal_salience,
+                               frontoparietal_ventralattention,
+                               frontoparietal_visual,
+                               retrosplenial_retrosplenial,
+                               retrosplenial_hand,
+                               retrosplenial_mouth,
+                               retrosplenial_salience,
+                               retrosplenial_ventralattention,
+                               retrosplenial_visual,
+                               hand_hand,
+                               hand_mouth,
+                               hand_salience,
+                               hand_ventralattention,
+                               hand_visual,
+                               mouth_mouth,
+                               mouth_salience,
+                               mouth_ventralattention,
+                               mouth_visual,
+                               salience_visual,
+                               salience_ventralattention,
+                               salience_salience,
+                               ventralattention_ventralattention,
+                               ventralattention_visual,
+                               visual_visual,
+                               TVMovies_wkdy,
+                               Videos_wkdy,
+                               Videogames_wkdy,
+                               Text_wkdy,
+                               SocMedia_wkdy,
+                               VideoChat_wkdy,
+                               TVMovies_wknd,
+                               Videos_wknd,
+                               Videogames_wknd,
+                               Text_wknd,
+                               SocMedia_wknd,
+                               VideoChat_wknd),
+               method="kendall",
+               use = "pairwise.complete.obs")
+
+# Correlation plot for network correlations and screen media use 
+png(filename=paste0(outputdir,"child_st_rs_corrplot2.png"),
+    width=7,height=6,units="in",res=300,bg="transparent")
+corrplot::corrplot(corr_STRS,
+                         method = "ellipse",
+                         tl.col = 'black',
+                         order="hclust",
+                         tl.pos = "lt",
+                         tl.cex = .5,
+                         number.cex = .3,
+                         mar=c(0,0,1,0))
+dev.off()
+
+```
+
+GFA
+```{r}
+networkcois<-c("audi_audi",
+               "audi_cingoper",
+               "audi_cingpari",
+               "audi_default",
+               "audi_dorsalattention",
+               "audi_frontoparietal",
+               "audi_retrosplenial",
+               "audi_hand",
+               "audi_mouth",
+               "audi_salience",
+               "audi_ventralattention",
+               "audi_visual",
+               "cingoper_cingoper",
+               "cingoper_cingpari",
+               "cingoper_default",
+               "cingoper_dorsalattention",
+               "cingoper_frontoparietal",
+               "cingoper_retrosplenial",
+               "cingoper_hand",
+               "cingoper_mouth",
+               "cingoper_salience",
+               "cingoper_ventralattention",
+               "cingoper_visual",
+               "cingpari_cingpari",
+               "cingpari_default",
+               "cingpari_dorsalattention",
+               "cingpari_frontoparietal",
+               "cingpari_retrosplenial",
+               "cingpari_hand",
+               "cingpari_mouth",
+               "cingpari_salience",
+               "cingpari_ventralattention",
+               "cingpari_visual",
+               "default_default",
+               "default_dorsalattention",
+               "default_frontoparietal",
+               "default_retrosplenial",
+               "default_hand",
+               "default_mouth",
+               "default_salience",
+               "default_ventralattention",
+               "default_visual",
+               "dorsalattention_dorsalattention",
+               "dorsalattention_frontoparietal",
+               "dorsalattention_retrosplenial",
+               "dorsalattention_hand",
+               "dorsalattention_mouth",
+               "dorsalattention_salience",
+               "dorsalattention_ventralattention",
+               "dorsalattention_visual",
+               "frontoparietal_frontoparietal",
+               "frontoparietal_retrosplenial",
+               "frontoparietal_hand",
+               "frontoparietal_mouth",
+               "frontoparietal_salience",
+               "frontoparietal_ventralattention",
+               "frontoparietal_visual",
+               "retrosplenial_retrosplenial",
+               "retrosplenial_hand",
+               "retrosplenial_mouth",
+               "retrosplenial_salience",
+               "retrosplenial_ventralattention",
+               "retrosplenial_visual",
+               "hand_hand",
+               "hand_mouth",
+               "hand_salience",
+               "hand_ventralattention",
+               "hand_visual",
+               "mouth_mouth",
+               "mouth_salience",
+               "mouth_ventralattention",
+               "mouth_visual",
+               "salience_visual",
+               "salience_ventralattention",
+               "salience_salience",
+               "ventralattention_ventralattention",
+               "ventralattention_visual",
+               "visual_visual")
+
+screenvars<-c("TVMovies_wkdy",
+         "Videos_wkdy",
+         "Videogames_wkdy",
+         "Text_wkdy",
+         "SocMedia_wkdy",
+         "VideoChat_wkdy",
+         "TVMovies_wknd",
+         "Videos_wknd",
+         "Videogames_wknd",
+         "Text_wknd",
+         "SocMedia_wknd",
+         "VideoChat_wknd")
+MEDIA <- as.matrix(restscreentime[,c(screenvars)])
+REST <- as.matrix(restscreentime[,c(networkcois)])
+
+# Code below adapted from Paulus et al., 2019. Please see paper for original code: https://doi.org/10.1016/j.neuroimage.2018.10.040
+
+MY <- list(MEDIA,REST)
+
+mynorm <- normalizeData(MY, type="scaleFeatures")
+
+opts <- getDefaultOpts()
+opts$vrbose <- 0
+
+# number of data for posterior vector:
+opts$iter.saved = 100
+
+startK = length(c(screenvars,networkcois))
+
+# Run the GFA:
+set.seed(123); res <- gfa(mynorm$train, K=90, opts=opts)
+
+today<-Sys.Date()
+save(res,file=paste0(outputdir,"GFA_",today,".RDS"))
+```
+```{r} 
+
+#Write the result to a file
+myall <- paste(outputdir,"ABCD_GFA_STfMRI_07.27.2021",".RData",sep="")
+save(res, file=myall)
+
+```
+
+```{r}
+vis <- visualizeComponents(res, Y = NULL, hclust = FALSE, topK = 0)
+myvec <- var.exp(res,22)
+nmvec <- as.array(myvec[,1])
+print("Variance Explained by Top 22 components:")
+print(myvec)
+vis.W(res, nmvec, c('Media','Resting State Networks'), 0.95,paste("GFA",nmvec,sep=""))
+
+# save image
+png(filename=paste0(outputdir,"GFA_Matrixtest.png"),
+    width=7,height=5,units="in",res=300,bg="transparent")
+vis.W(res, nmvec, c('Media','Resting State Networks'), 0.95,paste("GFA",nmvec,sep=""))
+dev.off()
+
+
+#Variance Explained Image
+png(filename=paste0(outputdir,"GFA_VarianceExplained.png"),
+    width=7,height=5,units="in",res=300,bg="transparent")
+plot(myvec[,1], myvec[,2], main="Variance Explained", xlab="GFA ", ylab="Variance Explained ")
+abline(h=1)
+dev.off()
+
+GFAnumber <-0
+GFAvariables <- rep(c(screenvars,networkcois), res$K)
+GFAvarlabs <- rep(c(screenvars,
+                     networkcois),
+                     res$K)
+GFAgroups <- rep(c(rep("Screen Media",length(screenvars)),
+                    rep("Resting State Networks",length(networkcois))),res$K)
+                 
+myvalues <- array(0,c(res$D*res$K,3))
+GFAlabels <- c("2.5% CI","Median","97.5% CI")
+
+colnames(myvalues)[1:3] <- c("CI025", "Median", "CI975")
+for(i in 1:3){
+label(myvalues[[i]]) <- GFAlabels[i]
+}
+
+for(i in 1: res$K){
+  for(j in 1: res$D){
+    GFAnumber[j+(i-1)*res$D] <- paste("SMA_GFA",i, sep="")
+    myvalues[j+(i-1)*res$D,] <- quantile(res$posterior$W[,j,i], probs = c(0.025, 0.5, 0.975))
+  }
+}
+
+myframe <-data.frame(GFAnumber,GFAgroups,GFAvarlabs,GFAvariables,myvalues)
+myframe$GFAvariables <- factor(myframe$GFAvariables, levels = c(screenvars,networkcois))
+
+# Save my data frame:
+# write.csv(myframe,file = paste0(outputdir,"MediaBrainGFA_",today,".csv"))
+
+```
+
+```{r}
+# Here is where the selected GFAs are identified:
+
+GFAselect <- nmvec
+PlotNb = 10
+myfactors <- paste("SMA_GFA", GFAselect[1:length(GFAselect)], sep="")
+mytitles <- {}
+
+for(i in 1:length(GFAselect)){
+    mytitles  <- cbind(mytitles,paste("SMA_GFA", GFAselect[i]," (",round(myvec[i,2],digits=2),"% Variance)",sep=""))
+  }
+
+# Plot the GFAs separately for the different brain variables:
+mediaGFAs <- c(2,4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+
+for(i in 1:length(mediaGFAs)){
+  plotGFA <- paste("SMA_GFA",mediaGFAs[i],sep="")
+  
+  # Functional Connectivity
+  mriGFA <- subset(myframe,(GFAnumber == plotGFA))
+  mynames <- c(screenvars,"TH")
+  mriGFA <- mriGFA[grep(paste(mynames, collapse='|'), mriGFA$GFAvarlabs, ignore.case=FALSE),]
+  mriGFA$GFAvariables <- factor(mriGFA$GFAvariables,c(screenvars,as.character(networkcois)))
+  
+  myGFAplot <-   ggplot(mriGFA, aes(GFAvariables, Median)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.8))) +
+    geom_point() + ggtitle(paste("Functional Connectivity:",mytitles[mediaGFAs[i]],sep = " "))  + geom_errorbar(aes(GFAvariables,ymin=CI025,ymax=CI975)) + geom_hline(yintercept = 0) +
+    scale_x_discrete(labels= c(screenvars,as.character(networkcois))) +
+    coord_flip()
+  print(myGFAplot)
+}
+
+for(i in 1:22){
+  myGFAplot <- ggplot(subset(myframe,GFAnumber==myfactors[i]), aes(GFAvariables, Median)) + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(0.4))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.4))) + geom_point() + ggtitle(mytitles[i])  + geom_errorbar(aes(GFAvariables,ymin=CI025,ymax=CI975)) + geom_hline(yintercept = 0) + coord_flip()
+  print(myGFAplot)
+}
+
+# Reconstruction of the data
+
+rec <- reconstruction(res)                        #Reconstruction
+recOrig <- undoNormalizeData(rec, mynorm)           #... to original space
+
+# Write the reconstructed Data to a file
+# myall <- paste(outputdir,"/ABCD_nda17_GFA_Media_brain_Recon_07.27.2021",".RData",sep="")
+# save(recOrig, file=myall)
+
+GFAselect <- c(2,4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+myfactors <- paste("SMA_GFA", GFAselect[1:length(GFAselect)], sep="")
+
+myGFA <- data.frame(res$X)
+colnames(myGFA) <- c(paste("SMA_GFA",1:res$K,sep = ""))
+
+for(i in 1:12){
+  # reorder with the match trick here:
+  mycircdata <- subset(myframe,GFAnumber==myfactors[i])
+  mynew <- mycircdata[match(c(screenvars,as.character(networkcois)),mycircdata$GFAvariables),]
+  # Generate the circbars here:
+  mycirc <- Circbar(mynew,3,mytitles[i])
+png(filename=paste0(outputdir,"GFA",GFAselect[i],".png"),
+    width=8.5,height=8.5,units="in",res=300,bg="transparent")
+  print(mycirc)
+  dev.off()
+}
+
+```
+
+
+```{r, Cross-Correlation of GFAs, fig.height = 8, fig.width = 8, echo = FALSE}
+
+corrplot(corM, method = 'ellipse', type = 'lower', tl.col = 'black', number.cex = .7)
+
+```
+```{r}
+
+# Make X Matrix into a data frame
+myGFA <- data.frame(res$X)
+colnames(myGFA) <- c(paste("SMA_GFA",1:res$K,sep = ""))
+
+```
+
+```{r}
+#Paulus code
+```
+
+```{r , Load the data set for Mixed Model Preparation, eval=TRUE, echo=TRUE}
+
+# load the GFAs
+mydir <- '/Users/jackmiller/STfMRI'
+myall <- paste(mydir,"/ABCD_GFA_STfMRI_07.27.2021",".RData",sep="")
+load(myall)
+
+#Do this if you haven't already created the myGFA dataframe above (i.e. if loading fresh)
+# Make X Matrix into a data frame
+myGFA <- data.frame(res$X)
+colnames(myGFA) <- c(paste("SMA_GFA",1:res$K,sep = ""))
+
+#Set up the merge by connecting participant's scores on GFA with demo 
+myGFA$subjectkey <- demo.df$subjectkey
+```
+
+```{r}
+
+#Merge 
+demo.df<-left_join(demo.df,myGFA,by="subjectkey")
+
+#Set up the nestvars- test site and family number (for twins)
+sitedata<-read.delim(paste0(basedir,"abcd_lt01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+demo.df <-left_join(demo.df,sitedata[ , c("subjectkey", "site_id_l")],by = "subjectkey")
+
+demo.df$siteID = demo.df$site_id_l.x
+
+famdata<-read.delim(paste0(basedir,"abcd_tztab01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+demo.df <-left_join(demo.df,famdata[ , c("subjectkey", "zyg_ss_fam_no")],by = "subjectkey")
+
+demo.df$familyID = demo.df$zyg_ss_fam_no.x
+
+mynames <- names(demo.df)
+
+#convert age column to a numeric column
+demo.df$age <- as.numeric(demo.df$interview_age)
+demo.df$demo_prnt_age_v2 <- as.numeric(demo.df$demo_prnt_age_v2)
+ 
+demo.df$highed <- demo.df$demo_prnt_ed_v2
+## Select covariates for model
+covars <- c("age","female", "RaceWhite", "RaceLatinx", "RaceBlack", "demo_prnt_ed_v2_strat","demo_prnt_marital_v2","demo_prnt_income_v2","demo_prnt_age_v2")
+
+names(demo.df)[names(demo.df)=="demo_prnt_ed_v2_strat"] <- "highed"
+names(demo.df)[names(demo.df)=="interview_age.x"] <- "age"
+names(demo.df)[names(demo.df)=="sex"] <- "female"
+
+covars <- c("age","female","RaceWhite", "RaceLatinx", "RaceBlack", "RaceAsian", "highed","married","familyincome","demo_prnt_age_v2")
+
+#Select wellbeing outcomes
+cbclvars <- c('internalizing', 'externalizing')
+
+#Select cognitive outcomes
+cogvars <- c("matrix_reasoning", "picvocab", "flanker","listsort", "cardsort","pattern","picture","reading") 
+
+#Select physical outcomes
+# physical <- 'bmi'
+
+## Select dependent variables
+depvars <- c(cbclvars,cogvars)
+
+deplabels <- c("Internalizing","Externalizing", "Matrix Reasoning",
+  "Picture Vocabulary","Flanker Test","List Sorting","Card Sorting","Pattern Comparison","Picture Sequence","Oral Reading Recog")
+
+#Select nesting variables
+names(demo.df)[names(demo.df)=="site_id_l"] <- "siteID"
+names(demo.df)[names(demo.df)=="zyg_ss_fam_no"] <- "familyID"
+
+nestvars <- c('siteID','familyID')
+
+## Select the independent variables:
+
+indepvars <- c("SMA_GFA2","SMA_GFA4","SMA_GFA7","SMA_GFA5", "SMA_GFA8", "SMA_GFA12", "SMA_GFA17", "SMA_GFA15", "SMA_GFA20", "SMA_GFA21", "SMA_GFA19", "SMA_GFA22")
+
+rindepvars <- c("SMA_GFA2","SMA_GFA4","SMA_GFA7","SMA_GFA5", "SMA_GFA8", "SMA_GFA12", "SMA_GFA17", "SMA_GFA15", "SMA_GFA20", "SMA_GFA21", "SMA_GFA19", "SMA_GFA22")
+```
+
+```{r}
+install.packages('TMB', type = 'source')
+library(VIM)
+library(merTools)
+library(gamm4)
+library(lme4)
+```
+
+```{r}
+
+## Form a temporary data frame with the necessary variables
+gamm4data <- demo.df[complete.cases(demo.df[,c(covars,nestvars, depvars,indepvars)]),
+                          c(covars,nestvars, depvars,indepvars)]
+
+setnames(gamm4data, old=c(indepvars), new=c(rindepvars))
+
+gammvars <- c("Intercept","SMA GFA2","SMA GFA4","SMA GFA7",
+              "SMA GFA5","SMA GFA8","SMA GFA12",
+              "SMA GFA17","SMA GFA15","SMA GFA20",
+              "SMA GFA21","SMA GFA19","SMA GFA22",
+              "age","Sex","RaceWhite", "RaceLatinx",
+              "RaceBlack", "RaceAsian", "Parental Education",
+              "Married", "<$25,000", "$25-50k", '$50k-100k',
+              '100k+', 'ParentAge')
+
+mediaGFAs <- c(2,4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+
+aggr(demo.df[,c(covars,depvars,indepvars)],col = c("blue","orange"),sortVars=TRUE,prop = FALSE, numbers = TRUE, combined = TRUE, cex.lab = 0.4, cex.axis =0.4, cex.numbers =0.4)
+
+```
+
+```{r}
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+
+
+## Selected dependent variables
+sdepvars <- c('internalizing', 'externalizing')
+sdeplabels <- c('internalizing', 'externalizing')
+# sdepvars <- c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+
+demo.df$age = as.numeric(demo.df$age)
+demo.df$highed = as.numeric(demo.df$highed)
+
+#IF this throws an error, it is a problem with highed. Run this: 
+# demo.df$highed <- demo.df$demo_prnt_ed_v2
+
+#If there's an 'Error in `$<-.data.frame`(`*tmp*`, "term", value = c("Intercept", "SMA GFA2",  : replacement has 26 rows, data has 45' error -- check and make sure that the correct columns are numeric
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# # Visualize Random Effects:
+# reEx <- REsim(mygamm4GFA$mer)
+# p1 <- plotREsim(reEx)
+# 
+# print(p1)
+# 
+# # Visualize the marginal effect
+# # For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(2, 4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+plotlist <- list()
+
+# for(j in 1:length(mediaGFAs)){
+#   plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+#   myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+#   p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,indepvars,covars,
+#                   myGFAtitle,sdeplabels[i])
+#   plotlist[[j]] <- p1
+# }
+# 
+# mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+# grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+# 
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+
+
+# depvars <- c("SMA_GFA2","SMA_GFA4","SMA_GFA7","SMA_GFA5", "SMA_GFA8", "SMA_GFA12", "SMA_GFA17", "SMA_GFA15", "SMA_GFA20", "SMA_GFA21", "SMA_GFA19", "SMA_GFA22")
+
+# # Loop through GFAs as dependent variables:
+# for(i in 1:length(depvars)){
+# # Assign a dependent variable:
+#   mydepvar <- depvars[i]
+# # Compare the model with and without the GFAs:
+# mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+# 
+# print(summary(mygamm4base$gam))
+# print(AIC(mygamm4base$mer))
+# }
+```
+
+```{r}
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c('picvocab', 'flanker', 'listsort')
+sdeplabels <- c('picvocab', 'flanker', 'listsort')
+# sdepvars <- c("matrix_reasoning", "picvocab",
+#                 "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# # Visualize Random Effects:
+# reEx <- REsim(mygamm4GFA$mer)
+# p1 <- plotREsim(reEx)
+# 
+# print(p1)
+# 
+# # Visualize the marginal effect
+# # For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(2, 4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+plotlist <- list()
+
+# for(j in 1:length(mediaGFAs)){
+#   plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+#   myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+#   p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,indepvars,covars,
+#                   myGFAtitle,sdeplabels[i])
+#   plotlist[[j]] <- p1
+# }
+# 
+# mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+# grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+# 
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+```
+```{r}
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c('matrix_reasoning', 'cardsort', 'pattern')
+sdeplabels <- c('matrix_reasoning', 'cardsort', 'pattern')
+# sdepvars <- c("matrix_reasoning", "picvocab",
+#                 "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning",
+#               "cardsort", "pattern","picture", "reading")
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# # Visualize Random Effects:
+# reEx <- REsim(mygamm4GFA$mer)
+# p1 <- plotREsim(reEx)
+# 
+# print(p1)
+# 
+# # Visualize the marginal effect
+# # For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(2, 4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+plotlist <- list()
+
+# for(j in 1:length(mediaGFAs)){
+#   plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+#   myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+#   p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,indepvars,covars,
+#                   myGFAtitle,sdeplabels[i])
+#   plotlist[[j]] <- p1
+# }
+# 
+# mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+# grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+# 
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+```
+
+```{r}
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c('picture', 'reading')
+sdeplabels <- c('picture', 'reading')
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# # Visualize Random Effects:
+# reEx <- REsim(mygamm4GFA$mer)
+# p1 <- plotREsim(reEx)
+# 
+# print(p1)
+# 
+# # Visualize the marginal effect
+# # For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(2, 4, 7, 5, 8, 12, 17, 15, 20, 21, 19, 22)
+plotlist <- list()
+
+# for(j in 1:length(mediaGFAs)){
+#   plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+#   myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+#   p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,indepvars,covars,
+#                   myGFAtitle,sdeplabels[i])
+#   plotlist[[j]] <- p1
+# }
+# 
+# mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+# grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+# }
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+```

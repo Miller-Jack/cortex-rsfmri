@@ -1,0 +1,690 @@
+---
+title: "ABCD_SocMed"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-07-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#install.packages('TMB', type = 'source')
+library(VIM)
+library(merTools)
+library(gamm4)
+library(lme4)
+library(dplyr)
+```
+
+```{r}
+# Need this function
+rep.row<-function(x,n){
+  matrix(rep(x,each=n),nrow=n)
+}
+
+## @knitr myGamm
+myGAMM4 <- function(dv,iv,cv,nv,dat)
+{
+  
+  indv <- paste(iv, collapse=" + ")
+  cova <- paste(cv, collapse=" + ")
+  nstv <- paste("~","(","1","|",nv[1],"/",nv[2],")",sep="")
+  
+  datnames <- names(dat)
+  
+  if(iv %in% datnames) {
+    form1 <- paste(dv," ~ ",indv," + ",cova,sep="")
+  } else { form1 <- paste(dv," ~ ",cova,sep="")}
+  
+  print(form1)
+  print(nstv)
+  
+  mygam <- gamm4(as.formula(form1), random = as.formula(nstv), data = dat)
+  
+  return(mygam)
+}
+
+Gamm4.vis <- function(allgfagam2,data,xvari,yvar,idv,covs,xlabel,ylabel){
+  
+  xvar <- which(colnames(data)==xvari)
+  
+  # setting up the data frame    
+  plot.df <- data.frame(GFA = rep(seq(min(data[,xvar]), max(data[,xvar]), length.out=200),2), female=rep(levels(as.factor(data$female)) , each=200) )
+  colnames(plot.df)[1] <- names(data[xvar])
+  
+  # setting up the covariates
+  cvar <- idv[!(colnames(data[c(idv)]) %in% xvari)]
+  avdata <- data.frame(rep.row(colMeans(data[,cvar]),400))
+  colnames(avdata)<- names(data[,cvar])
+  
+  
+  # Factor Variables:
+  fvar <- covs[!(colnames(data[c(covs)]) %in% "age")]
+  # populate the factors:
+  initdata <- facdata <- data[5,fvar]
+  for(i in 1:199){
+    facdata <- rbind(facdata,initdata)
+  }
+  
+  plot.df <- cbind(plot.df,avdata,row.names = NULL)
+  plot.df <- cbind(plot.df,facdata,row.names = NULL)
+  
+  plot.df = cbind(plot.df, as.data.frame(predict( allgfagam2$gam, plot.df, se.fit = T)))
+  pre.gamm.plot = plot.df
+  pre.gamm.plot$se = pre.gamm.plot$se.fit
+  print(names(pre.gamm.plot))
+  pre.gamm.plot <- pre.gamm.plot[, !duplicated(colnames(pre.gamm.plot))]
+  myplot <- ggplot(data=pre.gamm.plot, aes(x=pre.gamm.plot[,1],y=fit)) + geom_line(aes(y=fit,col=factor(female)), size=1) + geom_line(aes(y=fit+2*se,col=factor(female)), linetype="dashed") + xlab(xlabel) + ylab(ylabel)  + geom_line(aes(y=fit-2*se,col=factor(sex)), linetype="dashed") + scale_colour_discrete(labels =c("Male", "Female")) + ylim(-1, 1) + guides(color=guide_legend("Sex"))
+  
+  return(myplot)
+  
+}
+```
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c("knitr","data.table","tidyverse", "dplyr",
+              "ggplot2","RColorBrewer","corrplot","gridExtra",
+              "GFA","gamm4","psych", "glmnet", "tableone", "Hmisc")
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+lapply(packages, library, character.only = TRUE)
+
+theme_kate <- function () { 
+  theme_bw() +
+  theme_minimal(base_size = 16, base_family = "Avenir") +
+  theme(axis.line = element_line(colour = "black"),
+        panel.grid.major = element_blank(),
+        axis.text = element_text(size=14),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank())
+        #legend.position="none")
+}
+
+# Color palette
+colST <- colorRampPalette(c("#fee391", "#fe9929", "#253494"))
+```
+
+```{r}
+
+basedir = '/Volumes/devbrainlab/ABCD_Data/ABCD4pt0/' #Package folder with ABCD txt files 
+outputdir = '~/Dropbox/Shared Folders/ABCD Done Right/Script/' #Figure output folder 
+
+# Load screen time data
+screentimechild<-read.delim(paste0(basedir,"abcd_stq01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1" | eventname == '2_year_follow_up_y_arm_1')
+
+# Load mental health data
+CBCL1<-read.delim(paste0(basedir,"abcd_cbcls01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1" | eventname == '2_year_follow_up_y_arm_1')
+
+# Load cognitive variable data
+nihtoolbox<-read.delim(paste0(basedir,"abcd_tbss01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1" | eventname == '2_year_follow_up_y_arm_1')
+
+nihpearsonscores<-read.delim(paste0(basedir,"abcd_ps01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1" | eventname == '2_year_follow_up_y_arm_1')
+
+# Load demographic characteristics
+parentdem<-read.delim(paste0(basedir,"pdem02.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+#recode the household income variable
+parentdem <- parentdem %>% mutate(familyincome = ifelse(as.integer(as.character(demo_comb_income_v2)) <=4, "<$25k", ifelse(as.integer(as.character(demo_comb_income_v2)) >4 & as.integer(as.character(demo_comb_income_v2)) <=6, "$25k-50k", ifelse(as.integer(as.character(demo_comb_income_v2))>6 & as.integer(as.character(demo_comb_income_v2))<9, "$50k-100k", ifelse(as.integer(as.character(demo_comb_income_v2))>=9 & as.integer(as.character(demo_comb_income_v2))< 777, "100k", "Other")))))
+
+#give 1s to married parents, 0 to nonmarried 
+parentdem <- parentdem %>% mutate(married = ifelse(as.integer(as.character(demo_prnt_marital_v2)) <2, 1, 0))
+
+parentdem$RaceWhite <- parentdem$demo_race_a_p___10
+parentdem$RaceBlack <- parentdem$demo_race_a_p___11
+parentdem <- parentdem %>% mutate(RaceLatinx = ifelse(as.integer(as.character(demo_ethn_v2)) ==1,1, 0))
+
+parentdem <-parentdem %>% mutate(RaceAsian = ifelse(as.integer(as.character(demo_race_a_p___18)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___19)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___20)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___21)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___22)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___23)) == 1, 1,
+ifelse(as.integer(as.character(demo_race_a_p___24)) == 1, 1, 0))))))))
+
+#Load height/weight data:
+physicaldem<-read.delim(paste0(basedir,"abcd_ant01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+#calculate BMI:
+physicaldem$bmi <- (as.numeric(physicaldem$anthroweight1lb)/(as.numeric(physicaldem$anthro_1_height_in) * as.numeric(physicaldem$anthro_1_height_in))) *703
+
+#remove outliers in the BMI data - some heights and weights are coded incorrectly in the data
+physicaldem2 <- filter(physicaldem, bmi<40)
+physicaldem2 <- filter(physicaldem2, bmi>8)
+
+```
+
+```{r}
+# Convert screen time factors to numeric data
+forcednumericsST<-screentimechild%>%
+               dplyr::select(subjectkey,src_subject_id,sex,eventname,screen1_wkdy_y,screen2_wkdy_y,
+                      screen3_wkdy_y,screen4_wkdy_y,
+                      screen5_wkdy_y,screen_wkdy_y,
+                      screen7_wknd_y,screen8_wknd_y,
+                      screen9_wknd_y,screen10_wknd_y,
+                      screen11_wknd_y,screen12_wknd_y) %>%
+                mutate(TVMovies_wkdy=as.numeric(as.character(na.omit(screen1_wkdy_y))),
+                       Videos_wkdy=as.numeric(as.character(na.omit(screen2_wkdy_y))),
+                       Videogames_wkdy=as.numeric(as.character(na.omit(screen3_wkdy_y))),
+                       Text_wkdy=as.numeric(as.character(na.omit(screen4_wkdy_y))),
+                       SocMedia_wkdy=as.numeric(as.character(na.omit(screen5_wkdy_y))),
+                       VideoChat_wkdy=as.numeric(as.character(na.omit(screen_wkdy_y))),
+                       TVMovies_wknd=as.numeric(as.character(na.omit(screen7_wknd_y))),
+                       Videos_wknd=as.numeric(as.character(na.omit(screen8_wknd_y))),
+                       Videogames_wknd=as.numeric(as.character(na.omit(screen9_wknd_y))),
+                       Text_wknd=as.numeric(as.character(na.omit(screen10_wknd_y))),
+                       SocMedia_wknd=as.numeric(as.character(na.omit(screen11_wknd_y))),
+                       VideoChat_wknd=as.numeric(as.character(na.omit(screen12_wknd_y)))) %>%
+  dplyr::select(1:4,17:28)
+```
+
+```{r}
+# Filter CBCL and select outcomes of interest
+filteredCBCL<-CBCL1  %>%
+  dplyr::select(subjectkey,src_subject_id,sex,eventname,cbcl_scr_syn_internal_t,cbcl_scr_syn_external_t)
+
+# Filter cognitive variables and select outcomes of interest
+filteredcognition<-full_join((nihtoolbox %>%
+  dplyr::select(subjectkey,src_subject_id,sex,eventname,
+                nihtbx_picvocab_agecorrected,
+                nihtbx_flanker_agecorrected,
+                nihtbx_list_agecorrected,
+                nihtbx_cardsort_agecorrected,
+                nihtbx_pattern_agecorrected,
+                nihtbx_picture_agecorrected,
+                nihtbx_reading_agecorrected)),
+  (nihpearsonscores %>%
+  dplyr::select(subjectkey,
+                pea_wiscv_tss)))
+
+# Recode screentime data
+cleanscreentime <- forcednumericsST   %>%
+  mutate(total_child_weekday=rowSums(cbind(TVMovies_wkdy,Videos_wkdy,Videogames_wkdy,
+                                     Text_wkdy,SocMedia_wkdy,VideoChat_wkdy),na.rm = TRUE),
+         total_child_weekend=rowSums(cbind(TVMovies_wknd,Videos_wknd,
+                      Videogames_wknd,Text_wknd,
+                      SocMedia_wknd,VideoChat_wknd),na.rm = TRUE)) %>%
+  mutate(total_child_week=((5*total_child_weekday)+(2*total_child_weekend))) %>%
+  mutate(total_socmed_week=((5*SocMedia_wkdy)+(2*SocMedia_wknd)))
+
+# Calculate quartiles for total screen time use and assign to participants for demographics table
+cleanscreentime <- within(cleanscreentime, quartile <- as.integer(cut(total_child_week, unique(quantile(total_child_week, probs=0:4/4), include.lowest=TRUE))))
+
+# Combine screen time data with mental health outcomes
+cleanscreentime<-left_join(cleanscreentime, filteredCBCL, by=c("subjectkey", "src_subject_id", "sex","eventname")) %>%
+  mutate(internalizing=as.numeric(as.character(cbcl_scr_syn_internal_t)),
+         externalizing=as.numeric(as.character(cbcl_scr_syn_external_t)))
+
+# Add the cognitive outcomes
+cleanscreentime<-left_join(cleanscreentime,filteredcognition) %>%
+  mutate(matrix_reasoning=as.numeric(as.character(pea_wiscv_tss)),
+         picvocab=as.numeric(as.character(nihtbx_picvocab_agecorrected)),
+         flanker=as.numeric(as.character(nihtbx_flanker_agecorrected)),
+         listsort=as.numeric(as.character(nihtbx_list_agecorrected)),
+         cardsort=as.numeric(as.character(nihtbx_cardsort_agecorrected)),
+         pattern=as.numeric(as.character(nihtbx_pattern_agecorrected)),
+         picture=as.numeric(as.character(nihtbx_picture_agecorrected)),
+         reading=as.numeric(as.character(nihtbx_reading_agecorrected)))
+```
+
+```{r}
+#Identify included subjects (people with both baseline and 2-year followups)
+# Split the 'cleanscreentime' dataframe into timepoint1 and timepoint2 dataframes
+timepoint1 <- (cleanscreentime[cleanscreentime$eventname == 'baseline_year_1_arm_1', ]) %>% filter(!pea_wiscv_tss=="")
+timepoint2 <- cleanscreentime[cleanscreentime$eventname == '2_year_follow_up_y_arm_1', ]%>% filter(!pea_wiscv_tss=="")
+
+# histograms of social media
+library(ggplot2)
+soc_med_hist_t1<-ggplot(timepoint1, aes(x=total_socmed_week))+
+  geom_histogram(color="black", fill="lightblue",binwidth = .5)+
+  ggtitle("Total Weekly Social Media Use Baseline")
+
+soc_med_hist_t1
+
+ggsave(filename="soc_med_hist_t1.png",
+       plot=soc_med_hist_t1, width=4, height=3, units='in', dpi=300)
+
+soc_med_hist_t1_excludenonusers<-ggplot((timepoint1 %>% filter(!total_socmed_week=="0")), aes(x=total_socmed_week))+
+  geom_histogram(color="black", fill="lightblue",binwidth = .5)+
+  ggtitle("Total Weekly Social Media Use Excluding Non-Users Baseline")
+soc_med_hist_t1_excludenonusers
+
+ggsave(filename="soc_med_hist_t1_excludenonusers.png",
+       plot=soc_med_hist_t1_excludenonusers, width=4, height=3, units='in', dpi=300)
+
+soc_med_hist_t2<-ggplot(timepoint2, aes(x=total_socmed_week))+
+  geom_histogram(color="black", fill="lightblue",binwidth = .5)+
+  ggtitle("Total Weekly Social Media Use Follow-up")
+
+soc_med_hist_t2
+
+ggsave(filename="soc_med_hist_t2.png",
+       plot=soc_med_hist_t2, width=4, height=3, units='in', dpi=300)
+
+soc_med_hist_t2_excludenonusers<-ggplot((timepoint2 %>% filter(!total_socmed_week=="0")), aes(x=total_socmed_week))+
+  geom_histogram(color="black", fill="lightblue",binwidth = .5)+
+  ggtitle("Total Weekly Social Media Use Excluding Non-Users Follow-up")
+soc_med_hist_t2_excludenonusers
+
+ggsave(filename="soc_med_hist_t2_excludenonusers.png",
+       plot=soc_med_hist_t2_excludenonusers, width=4, height=3, units='in', dpi=300)
+
+
+
+# Identify the common subjects in both timepoint1 and timepoint2 dataframes
+common_subjects <- intersect(timepoint1$subjectkey, timepoint2$subjectkey)
+valid_subjects <- data.frame(subjectkey = common_subjects)
+
+# Filter the original 'cleanscreentime' dataframe to include only subjects in 'valid_subjects'
+cleanscreentime_filtered <- cleanscreentime[cleanscreentime$subjectkey %in% valid_subjects$subjectkey, ]
+
+# Merge timepoint1 and timepoint2 dataframes based on 'subjectkey'
+merged_df <- merge(timepoint1, timepoint2, by = 'subjectkey', suffixes = c("", "_t2"))
+
+# Filter the merged dataframe to include only valid subjects
+merged_df <- merged_df[merged_df$subjectkey %in% valid_subjects$subjectkey, ]
+
+#cleanscreentime_filtered is a large df with multiple entries of subject key 
+
+#merged_df is a wider (merged) with unique subjectkeys and multiple timepoints in the same row 
+
+```
+
+```{r}
+#Select Participants:
+valid_subjects <- data.frame(subjectkey = common_subjects)
+
+#because demographics table based around timepoint1, created filteredfirst_timepoint
+cleanscreentime_filt_t1<- timepoint1[timepoint1$subjectkey %in% valid_subjects$subjectkey, ]
+
+demo.df<-left_join(merged_df,parentdem,by = c("subjectkey", "src_subject_id", "sex"))
+demo.df <-left_join(demo.df,physicaldem2[ , c("subjectkey", "bmi")],by = "subjectkey")
+
+demo.df<-demo.df %>% mutate(interview_age=as.integer(as.character(interview_age)))
+
+demo.df<-demo.df %>%
+  mutate(demo_prnt_ed_v2_strat=ifelse(as.integer(as.character(demo_prnt_ed_v2))<=12,"no_hs_grad",
+                                      ifelse(as.integer(as.character(demo_prnt_ed_v2))>12 & as.integer(as.character(demo_prnt_ed_v2))<15,"hs_grad",
+                                             ifelse(as.integer(as.character(demo_prnt_ed_v2))>17 & as.integer(as.character(demo_prnt_ed_v2))<22,"ba_or_higher",NA))))
+
+demo.df$interview_age = as.numeric(demo.df$interview_age)
+demo.df$RaceLatinx = as.character(demo.df$RaceLatinx)
+demo.df$RaceAsian = as.character(demo.df$RaceAsian)
+
+
+```
+
+```{r}
+#begin setting up GAMMs:
+
+#Set up the nestvars- test site and family number (for twins)
+sitedata<-read.delim(paste0(basedir,"abcd_lt01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+demo.df <-left_join(demo.df,sitedata[ , c("subjectkey", "site_id_l")],by = "subjectkey")
+
+
+demo.df$siteID = demo.df$site_id_l.x
+
+famdata<-read.delim(paste0(basedir,"abcd_tztab01.txt"),
+                            header = TRUE, sep = "\t", dec = ".") %>%
+  filter(eventname == "baseline_year_1_arm_1")
+
+demo.df <-left_join(demo.df,famdata[ , c("subjectkey", "zyg_ss_fam_no")],by = "subjectkey")
+
+demo.df$familyID = demo.df$zyg_ss_fam_no.x
+
+mynames <- names(demo.df)
+
+#convert age column to a numeric column
+demo.df$age <- as.numeric(demo.df$interview_age)
+demo.df$demo_prnt_age_v2 <- as.numeric(demo.df$demo_prnt_age_v2)
+ 
+#demo.df$highed <- demo.df$demo_prnt_ed_v2
+## Select covariates for model
+covars <- c("age","female", "RaceWhite", "RaceLatinx", "RaceBlack", "demo_prnt_ed_v2_strat","demo_prnt_marital_v2","demo_prnt_income_v2","demo_prnt_age_v2")
+
+names(demo.df)[names(demo.df)=="demo_prnt_ed_v2_strat"] <- "highed"
+names(demo.df)[names(demo.df)=="interview_age.x"] <- "age"
+names(demo.df)[names(demo.df)=="sex"] <- "female"
+
+covars <- c("age","female","RaceWhite", "RaceLatinx", "RaceBlack", "RaceAsian", "highed","married","familyincome","demo_prnt_age_v2")
+
+#Select wellbeing outcomes
+cbclvars <- c('internalizing_t2', 'externalizing_t2')
+
+#Select cognitive outcomes
+cogvars <- c("matrix_reasoning_t2", "picvocab_t2", "flanker_t2","listsort_t2", "cardsort_t2","pattern_t2","picture_t2","reading_t2") 
+
+#Select physical outcomes
+# physical <- 'bmi'
+
+## Select dependent variables
+depvars <- c(cbclvars,cogvars)
+
+deplabels <- c("Internalizing","Externalizing", "Matrix Reasoning",
+  "Picture Vocabulary","Flanker Test","List Sorting","Card Sorting","Pattern Comparison","Picture Sequence","Oral Reading Recog")
+
+#Select nesting variables
+names(demo.df)[names(demo.df)=="site_id_l"] <- "siteID"
+names(demo.df)[names(demo.df)=="zyg_ss_fam_no"] <- "familyID"
+
+nestvars <- c('siteID','familyID')
+```
+
+```{r}
+indepvars <- c("total_socmed_week")
+stratvars <- c("quartile")
+
+rindepvars <- c("total_socmed_week")
+```
+
+```{r}
+
+#Visualize missingness:
+aggr(demo.df[,c(covars,depvars,indepvars)],col = c("blue","orange"),sortVars=TRUE,prop = FALSE, numbers = TRUE, combined = TRUE, cex.lab = 0.4, cex.axis =0.4, cex.numbers =0.4)
+```
+
+```{r}
+#set up complete dataset: 
+gamm4data <- demo.df[c(covars,nestvars,depvars,indepvars,stratvars)]
+colnames(gamm4data)
+
+gammvars <- c("Intercept", "total_socmed_week", "Age","Sex","RaceWhite", "RaceLatinx", "RaceBlack", "RaceAsian", "Parental Education","Married", "<$25,000", "$25-50k", "$50k-100k","100k+", "ParentAge")
+
+# Create demographic table 
+table1 <- CreateTableOne(vars = c("age", "total_socmed_week",
+                                  "female","RaceWhite", "RaceLatinx","RaceBlack", "RaceAsian", "highed",  "married", "familyincome"),
+                         strata="quartile",
+                       data = gamm4data,
+                       factorVars = c("female","highed"))
+
+tablematrixcomplete <- print(table1, printToggle = FALSE, noSpaces = TRUE, minMax = TRUE)
+kable(tablematrixcomplete,"html") 
+write.csv(tablematrixcomplete, file = "~/Downloads/demographic_socmed_complete.csv")
+
+```
+
+
+```{r}
+#Run the GAMMs -- separated to make interpretation easy! 
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c('internalizing_t2', 'externalizing_t2')
+sdeplabels <- c('Internalizing', 'Externalizing')
+# sdepvars <- c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+
+demo.df$age = as.numeric(demo.df$age)
+demo.df$highed = as.numeric(demo.df$demo_prnt_ed_v2)
+
+#IF this throws an error, it is a problem with highed. Run this: 
+# demo.df$highed <- demo.df$demo_prnt_ed_v2
+
+#If there's an 'Error in `$<-.data.frame`(`*tmp*`, "term", value = c("Intercept", "SMA GFA2",  : replacement has 26 rows, data has 45' error -- check and make sure that the correct columns are numeric
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4socmed <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4socmed$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+print(summary(mygamm4base$gam))
+print(summary(mygamm4socmed$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4socmed$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4socmed$mer))
+}
+```
+
+
+```{r}
+# Center all dependent measures
+#gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c("matrix_reasoning_t2", "picvocab_t2", "flanker_t2")
+sdeplabels <- c('Matrix Reasoning', 'Picture Vocabulary', "Flanker Test")
+# sdepvars <- c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+
+#demo.df$age = as.numeric(demo.df$age)
+#demo.df$highed = as.numeric(demo.df$highed)
+#demo.df$highed = as.numeric(demo.df$demo_prnt_ed_v2)
+
+#IF this throws an error, it is a problem with highed. Run this: 
+# demo.df$highed <- demo.df$demo_prnt_ed_v2
+
+#If there's an 'Error in `$<-.data.frame`(`*tmp*`, "term", value = c("Intercept", "SMA GFA2",  : replacement has 26 rows, data has 45' error -- check and make sure that the correct columns are numeric
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4socmed <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4socmed$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+print(summary(mygamm4base$gam))
+print(summary(mygamm4socmed$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4socmed$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4socmed$mer))
+}
+``` 
+
+```{r}
+# Center all dependent measures
+#gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c("listsort_t2", "cardsort_t2", "pattern_t2")
+sdeplabels <- c('List Sort Test', 'Card Sort Task', 'Pattern Comparison')
+# sdepvars <- c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+
+#demo.df$age = as.numeric(demo.df$age)
+#demo.df$highed = as.numeric(demo.df$highed)
+
+#IF this throws an error, it is a problem with highed. Run this: 
+#demo.df$highed <- demo.df$demo_prnt_ed_v2
+
+#If there's an 'Error in `$<-.data.frame`(`*tmp*`, "term", value = c("Intercept", "SMA GFA2",  : replacement has 26 rows, data has 45' error -- check and make sure that the correct columns are numeric
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4socmed <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+# feEx <- FEsim(mygamm4base$mer,1000)
+# cbind(feEx[,1],round(feEx[,2:4],3))
+# feEx$term <- gammvars
+
+feEx <- FEsim(mygamm4socmed$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+print(summary(mygamm4base$gam))
+print(summary(mygamm4socmed$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4socmed$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4socmed$mer))
+}
+``` 
+
+```{r}
+# Center all dependent measures
+#gamm4data[,depvars] <- scale(gamm4data[,depvars])
+
+## Selected dependent variables
+sdepvars <- c("picture_t2", "reading_t2")
+sdeplabels <- c('Picture Sequence Memory', 'Oral Reading Recognition')
+# sdepvars <- c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+# sdeplabels <-c("internalizing","externalizing","matrix_reasoning", "picvocab",
+#               "flanker", "listsort", "cardsort", "pattern","picture", "reading")
+
+#demo.df$age = as.numeric(demo.df$age)
+#demo.df$highed = as.numeric(demo.df$highed)
+
+#IF this throws an error, it is a problem with highed. Run this: 
+#demo.df$highed <- demo.df$demo_prnt_ed_v2
+
+#If there's an 'Error in `$<-.data.frame`(`*tmp*`, "term", value = c("Intercept", "SMA GFA2",  : replacement has 26 rows, data has 45' error -- check and make sure that the correct columns are numeric
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- demo.df[complete.cases(demo.df[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+# rindepvars=indepvars
+# setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4socmed <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4socmed$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) +
+  aes(x = term, ymin = median - 1.96 * sd,
+      ymax = median + 1.96 * sd, y = median) +
+  geom_pointrange() +
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) +
+  coord_flip() +
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""),
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+print(summary(mygamm4base$gam))
+print(summary(mygamm4socmed$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4socmed$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4socmed$mer))
+}
+``` 
